@@ -39,15 +39,13 @@ Write native Typst:
   ~org-format-latex-options~.
 - Cache location inherited from ~org-preview-latex-image-directory~.
 - Optional idle auto-preview mode.
-- Typst diagnostics attached to failed formulas and collected in a dedicated
-  buffer.
+- The latest Typst compiler error is kept in a dedicated diagnostics buffer.
 - Temporary source files are created next to local Org files, allowing relative
   imports in ~org-typst-preview-preamble~, and removed after compilation.
 
 * Requirements
 
-- Emacs 28.1 or newer.
-- Org 9.5 or newer.
+- Emacs 30.1 or newer.
 - The [[https://typst.app/open-source/][Typst CLI]] available on ~exec-path~.
 - Emacs built with SVG image support.
 
