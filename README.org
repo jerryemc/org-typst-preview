@@ -8,25 +8,28 @@ already know from ~org-latex-preview~.
 
 * Why
 
-Org recognizes ~$...$~ as a ~latex-fragment~.  That parser is useful even when
-the contents use Typst instead of LaTeX.  This package keeps Org's parser,
-commands, key bindings, colors, cache location, and image overlay conventions,
-but replaces the synchronous LaTeX toolchain with an asynchronous Typst-to-SVG
-renderer.
+Typst and LaTeX should be able to coexist in one Org document without guessing
+which language a ~$...$~ fragment contains.  This package therefore uses
+unambiguous custom boundaries while keeping Org's familiar preview commands,
+key bindings, colors, cache location, and image overlay conventions.  The
+renderer itself is an asynchronous Typst-to-SVG pipeline.
 
 Write native Typst:
 
 #+begin_src org
-  Inline math: $sum_(i=1)^n i$.
+  Inline math: #(sum_(i=1)^n i#).
 
-  Display math uses Typst's spaces next to the delimiters:
+  Display math uses square boundaries:
 
-  $ sum_(i=1)^n i = (n(n+1))/2 $
+  #[
+    sum_(i=1)^n i = (n(n+1))/2
+  #]
 #+end_src
 
 * Features
 
-- Native Typst math inside ordinary Org ~$...$~ fragments.
+- Native Typst math inside ~#(...#)~ and ~#[...#]~ boundaries.
+- LaTeX ~$...$~ fragments remain untouched and can coexist in the same file.
 - Drop-in command behavior for ~org-latex-preview~, including its prefix
   arguments and the standard ~C-c C-x C-l~ binding.
 - Fully asynchronous rendering with a configurable concurrency limit.
@@ -131,33 +134,43 @@ When a relative file is imported by the preamble, it is resolved relative to
 the Org buffer directory because temporary Typst source files are created
 there.
 
-* Delimiters and Org parsing
+* Delimiters
 
-The recommended forms are exactly Typst's native delimiters:
+Parentheses select an inline formula.  Square brackets select a display
+formula.  Write only the Typst math body inside them; the package adds Typst's
+native dollar delimiters before compilation:
 
 #+begin_src org
-  Inline: $integral_0^1 x^2 dif x$
+  Inline: #(integral_0^1 x^2 dif x#)
 
-  Block: $ integral_0^1 x^2 dif x = 1/3 $
+  Block:
+
+  #[
+    integral_0^1 x^2 dif x = 1/3
+  #]
 #+end_src
 
-For migration, ~$$...$$~, ~\(...\)~, and ~\[...\]~ are normalized to Typst
-delimiters before rendering.  They are not recommended for new documents.
+The complete boundary pairs are:
 
-Org still names these syntax nodes ~latex-fragment~ internally.  The name is an
-implementation detail; the contents passed to this package are Typst.
+| Kind    | Open | Close |
+|---------+------+-------|
+| Inline  | ~#(~ | ~#)~  |
+| Display | ~#[~ | ~#]~  |
+
+Prefix an opening boundary with a backslash when it should remain literal:
+~\#(not a formula#)~.  Boundaries inside Org source, example, export, code,
+verbatim, comment, property, and fixed-width content are ignored.
 
 * Export
 
-This package changes previews only.  It intentionally does not change Org's
-export backends.  To export the same native Typst formulas through
-[[https://github.com/jmpunkt/ox-typst][ox-typst]], select its naive fragment conversion so the formula text is passed
-through unchanged:
+When ~org-typst-preview-mode~ is active, Typst export is handled automatically.
+Before a Typst backend parses its temporary export buffer, inline boundaries
+become Typst export snippets and display boundaries become Typst export blocks.
+The original Org buffer is never modified.  This works with
+[[https://github.com/jmpunkt/ox-typst][ox-typst]] and does not depend on its LaTeX conversion setting.
 
-#+begin_src emacs-lisp
-  (setq org-typst-from-latex-fragment #'org-typst-from-latex-with-naive
-        org-typst-from-latex-environment #'org-typst-from-latex-with-naive)
-#+end_src
+Other export backends keep the custom boundaries unchanged.  Set
+~org-typst-preview-export-to-typst~ to nil to disable the transformation.
 
 * Security
 

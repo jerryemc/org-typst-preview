@@ -4,7 +4,7 @@
 
 ;; Author: Roi Fe Wu <roifewu@gmail.com>
 ;; Maintainer: Roi Fe Wu <roifewu@gmail.com>
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: outlines, tex, typst, multimedia
 ;; URL: https://github.com/roife/org-typst-preview
@@ -27,8 +27,8 @@
 ;;; Commentary:
 
 ;; Render native Typst math in Org buffers through the interface people
-;; already use for `org-latex-preview'.  Org continues to parse `$...$' as a
-;; `latex-fragment'; this package changes only the preview renderer.
+;; already use for `org-latex-preview'.  Inline formulae use `#(...#)' and
+;; display formulae use `#[...#]', keeping Org's `$...$' LaTeX syntax free.
 ;;
 ;; Enable `org-typst-preview-mode' to remap `org-latex-preview' and
 ;; `org-toggle-latex-fragment' to the asynchronous Typst implementation.  The
@@ -40,13 +40,13 @@
 ;; Org's `org-latex-overlay' type, so `org-clear-latex-preview' can also remove
 ;; completed Typst previews.
 ;;
-;; Inline Typst math has no spaces next to the delimiters:
+;; Inline Typst math:
 ;;
-;;     $sum_(i=1)^n i$
+;;     #(sum_(i=1)^n i#)
 ;;
-;; Display math has spaces next to both delimiters:
+;; Display Typst math:
 ;;
-;;     $ sum_(i=1)^n i = (n(n+1))/2 $
+;;     #[sum_(i=1)^n i = (n(n+1))/2#]
 ;;
 ;; Rendering is asynchronous, concurrent work is bounded, identical jobs are
 ;; coalesced, and successful SVG output is cached by content.
@@ -151,6 +151,14 @@ read files allowed by the local Typst compiler configuration."
   :type 'boolean
   :risky t)
 
+(defcustom org-typst-preview-export-to-typst t
+  "Whether to expand preview fragments when exporting to a Typst backend.
+
+Inline fragments become Typst export snippets.  Display fragments become
+Typst export blocks.  Other export backends keep the original delimiters."
+  :group 'org-typst-preview
+  :type 'boolean)
+
 (defface org-typst-preview-error
   '((t :inherit error :underline (:style wave)))
   "Face used to mark a Typst fragment whose compilation failed."
@@ -182,7 +190,7 @@ read files allowed by the local Typst compiler configuration."
 (defvar-local org-typst-preview-auto-mode nil
   "Non-nil when edited Typst fragments are previewed automatically.")
 
-(defconst org-typst-preview--cache-version 1
+(defconst org-typst-preview--cache-version 2
   "Version mixed into generated preview cache keys.")
 
 (defun org-typst-preview--safe-to-run-p ()
@@ -267,62 +275,6 @@ ATTRIBUTE is either `:foreground' or `:background'."
      value
      "\n")))
 
-(defun org-typst-preview--normalize-fragment (value)
-  "Convert Org math fragment VALUE to native Typst delimiters.
-
-Native `$...$' input is unchanged.  Org's legacy `$$...$$', `\\(...\\)',
-and `\\[...\\]' delimiters are accepted as migration conveniences."
-  (cond
-   ((and (>= (length value) 4)
-         (string-prefix-p "$$" value)
-         (string-suffix-p "$$" value))
-    (concat "$ " (string-trim (substring value 2 -2)) " $"))
-   ((and (>= (length value) 2)
-         (string-prefix-p "$" value)
-         (string-suffix-p "$" value))
-    value)
-   ((and (>= (length value) 4)
-         (string-prefix-p "\\(" value)
-         (string-suffix-p "\\)" value))
-    (concat "$" (substring value 2 -2) "$"))
-   ((and (>= (length value) 4)
-         (string-prefix-p "\\[" value)
-         (string-suffix-p "\\]" value))
-    (concat "$ " (string-trim (substring value 2 -2)) " $"))
-   (t nil)))
-
-(defun org-typst-preview--block-p (value)
-  "Return non-nil when normalized Typst math VALUE is display math."
-  (let ((length (length value)))
-    (and (> length 3)
-         (eq (aref value 0) ?$)
-         (memq (aref value 1) '(?\s ?\t ?\n ?\r))
-         (memq (aref value (- length 2)) '(?\s ?\t ?\n ?\r))
-         (eq (aref value (1- length)) ?$))))
-
-(defun org-typst-preview--fragment-from-element (element)
-  "Return preview data for Org ELEMENT, or nil when it is unsupported."
-  (when (eq (org-element-type element) 'latex-fragment)
-    (when-let* ((value (org-element-property :value element))
-                (normalized (org-typst-preview--normalize-fragment value)))
-      (let* ((begin (org-element-property :begin element))
-             (end (save-excursion
-                    (goto-char (org-element-property :end element))
-                    (skip-chars-backward " \r\t\n")
-                    (point))))
-        (list :begin begin :end end :value normalized
-              :block (org-typst-preview--block-p normalized))))))
-
-(defun org-typst-preview--fragment-at-point ()
-  "Return preview data for the Typst math fragment at point, if any."
-  (or (org-typst-preview--fragment-from-element (org-element-context))
-      (and (> (point) (point-min))
-           (save-excursion
-             (backward-char)
-             (org-typst-preview--fragment-from-element
-              (org-element-context))))
-      (org-typst-preview--custom-block-containing-point)))
-
 (defun org-typst-preview--in-literal-context-p (position)
   "Return non-nil when POSITION is inside Org content that must stay literal."
   (save-excursion
@@ -335,37 +287,47 @@ and `\\[...\\]' delimiters are accepted as migration conveniences."
               src-block verbatim)
        t))))
 
-(defun org-typst-preview--custom-block-at (position &optional limit)
-  "Parse native Typst display math beginning at POSITION.
+(defun org-typst-preview--fragment-at (position &optional limit)
+  "Parse a Typst preview fragment beginning at POSITION.
 
-Unlike Org's LaTeX parser, Typst display math has whitespace immediately after
-the opening dollar and before the closing dollar.  Search no farther than
-LIMIT, which defaults to `point-max'."
+Recognize `#(...#)' as inline math and `#[...#]' as display math.  Search no
+farther than LIMIT, which defaults to `point-max'."
   (save-excursion
     (goto-char position)
-    (when (and (eq (char-after) ?$)
-               (not (eq (char-before) ?\\))
-               (memq (char-after (1+ position)) '(?\s ?\t ?\n ?\r))
-               (not (org-typst-preview--in-literal-context-p position)))
-      (forward-char 2)
-      (let (closing)
-        (while (and (not closing) (search-forward "$" limit t))
-          (let ((delimiter (1- (point))))
-            (when (and (> delimiter position)
-                       (memq (char-before delimiter) '(?\s ?\t ?\n ?\r))
-                       (not (eq (char-before (1- delimiter)) ?\\)))
-              (setq closing (point)))))
-        (when closing
-          (let ((value (buffer-substring-no-properties position closing)))
-            (list :begin position :end closing :value value :block t)))))))
+    (let* ((opener (buffer-substring-no-properties
+                    position (min (+ position 2) (point-max))))
+           (block-p (equal opener "#["))
+           (closer (cond ((equal opener "#(") "#)")
+                         (block-p "#]"))))
+      (when (and closer
+		 (not (eq (char-before) ?\\))
+		 (not (org-typst-preview--in-literal-context-p position)))
+        (forward-char 2)
+        (let (closing-start closing-end)
+          (while (and (not closing-end)
+                      (search-forward closer (or limit (point-max)) t))
+            (let ((candidate (- (point) 2)))
+              (unless (eq (char-before candidate) ?\\)
+                (setq closing-start candidate
+                      closing-end (point)))))
+          (when closing-end
+            (let* ((body (string-trim
+                          (buffer-substring-no-properties
+                           (+ position 2) closing-start)))
+                   (value (if block-p
+                              (concat "$ " body " $")
+                            (concat "$" body "$"))))
+              (list :begin position :end closing-end
+                    :body body :value value :block block-p))))))))
 
-(defun org-typst-preview--custom-block-containing-point ()
-  "Return native Typst display math containing point, if any."
-  (let ((origin (point)) found)
+(defun org-typst-preview--fragment-at-point ()
+  "Return the Typst preview fragment containing point, if any."
+  (let* ((origin (point))
+         (found (org-typst-preview--fragment-at origin)))
     (save-excursion
-      (while (and (not found) (search-backward "$" nil t))
+      (while (and (not found) (search-backward "#" nil t))
         (when-let* ((fragment
-                     (org-typst-preview--custom-block-at (point))))
+                     (org-typst-preview--fragment-at (point))))
           (when (<= (plist-get fragment :begin)
                     origin
                     (plist-get fragment :end))
@@ -374,27 +336,47 @@ LIMIT, which defaults to `point-max'."
 
 (defun org-typst-preview--collect-fragments (begin end)
   "Collect Typst math fragments wholly between BEGIN and END."
-  (let ((regexp "\\$\\|\\\\[([]")
-        fragments
-        last-begin)
+  (let ((regexp (regexp-opt '("#(" "#[")))
+        fragments)
     (save-excursion
       (goto-char begin)
       (while (re-search-forward regexp end t)
         (when-let* ((fragment
-                     (or (and (eq (char-after (match-beginning 0)) ?$)
-                              (org-typst-preview--custom-block-at
-                               (match-beginning 0) end))
-                         (org-typst-preview--fragment-from-element
-                          (org-element-context)))))
+                     (org-typst-preview--fragment-at
+                      (match-beginning 0) end)))
           (let ((fragment-begin (plist-get fragment :begin))
                 (fragment-end (plist-get fragment :end)))
             (when (and (>= fragment-begin begin)
-                       (<= fragment-end end)
-                       (not (equal fragment-begin last-begin)))
-              (setq last-begin fragment-begin)
+                       (<= fragment-end end))
               (push fragment fragments))
             (goto-char (max (point) fragment-end))))))
     (nreverse fragments)))
+
+(defun org-typst-preview--typst-export-backend-p (backend)
+  "Return non-nil when BACKEND is Typst or derives from it."
+  (or (eq backend 'typst)
+      (and (fboundp 'org-export-derived-backend-p)
+           (ignore-errors
+             (org-export-derived-backend-p backend 'typst)))))
+
+(defun org-typst-preview--export-before-parsing (backend)
+  "Expand preview boundaries before exporting through Typst BACKEND."
+  (when (and org-typst-preview-export-to-typst
+             (org-typst-preview--typst-export-backend-p backend))
+    (dolist (fragment
+             (nreverse
+              (org-typst-preview--collect-fragments
+               (point-min) (point-max))))
+      (let ((begin (plist-get fragment :begin))
+            (end (plist-get fragment :end))
+            (value (plist-get fragment :value)))
+        (goto-char begin)
+        (delete-region begin end)
+        (if (plist-get fragment :block)
+            (insert "\n#+begin_export typst\n"
+                    value
+                    "\n#+end_export\n")
+          (insert "@@typst:" value "@@"))))))
 
 (defun org-typst-preview--image-directory ()
   "Return the local absolute cache directory for the current buffer."
@@ -868,13 +850,24 @@ universal prefixes, clear the whole buffer."
     map)
   "Keymap for `org-typst-preview-mode'.")
 
+(defun org-typst-preview--export-hook-symbol ()
+  "Return the before-parsing export hook used by the installed Org version."
+  (if (version< (org-version) "9.6")
+      'org-export-before-parsing-hook
+    'org-export-before-parsing-functions))
+
 ;;;###autoload
 (define-minor-mode org-typst-preview-mode
   "Use Typst for Org's existing LaTeX preview commands and bindings.
 
-This mode remaps commands only.  It does not alter Org parsing or export."
+This mode remaps preview commands and enables Typst-boundary expansion for
+Typst export backends.  It does not alter Org's parser."
   :lighter " Typst∑"
-  :keymap org-typst-preview-mode-map)
+  :keymap org-typst-preview-mode-map
+  (let ((hook (org-typst-preview--export-hook-symbol)))
+    (if org-typst-preview-mode
+        (add-hook hook #'org-typst-preview--export-before-parsing nil t)
+      (remove-hook hook #'org-typst-preview--export-before-parsing t))))
 
 (defun org-typst-preview--auto-run (buffer marker)
   "Render the fragment near MARKER in BUFFER after an idle delay."
