@@ -248,7 +248,6 @@ Nil reuses the `:scale' value in `org-format-latex-options'."
       (condition-case error-data
           (when success
             (rename-file (org-typst-preview--job-render job) output t)
-            (clear-image-cache output)
             (dolist (overlay (org-typst-preview--job-overlays job))
               (when (overlay-buffer overlay)
                 (overlay-put overlay 'display
