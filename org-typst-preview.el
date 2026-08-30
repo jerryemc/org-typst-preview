@@ -4,7 +4,7 @@
 
 ;; Author: Roi Fe Wu <roifewu@gmail.com>
 ;; Maintainer: Roi Fe Wu <roifewu@gmail.com>
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: outlines, tex, typst, multimedia
 ;; URL: https://github.com/roife/org-typst-preview
@@ -206,10 +206,17 @@ Nil reuses the `:scale' value in `org-format-latex-options'."
              org-typst-preview-page-margin
              (if (equal background "Transparent")
                  "none"
-               (format "rgb(%s)" (org-latex-color-format background))))
+               (format "rgb(%s)"
+                       (mapconcat
+                        (lambda (component)
+                          (number-to-string (round (/ component 257.0))))
+                        (color-values background) ","))))
      (format "#set text(size: %.3fpt, fill: rgb(%s)%s)\n"
              (* org-typst-preview-font-size scale)
-             (org-latex-color-format foreground)
+             (mapconcat
+              (lambda (component)
+                (number-to-string (round (/ component 257.0))))
+              (color-values foreground) ",")
              font)
      "#show math.equation: set text(top-edge: \"bounds\", bottom-edge: \"bounds\")\n"
      (unless (string-empty-p org-typst-preview-preamble)

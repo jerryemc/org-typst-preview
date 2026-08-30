@@ -56,7 +56,7 @@
     (let ((source (org-typst-preview--source "$answer$" 'default)))
       (should (string-match-p "fill: none" source))
       (should (string-match-p "size: 20\\.000pt" source))
-      (should (string-match-p "fill: rgb(1,0,0)" source))
+      (should (string-match-p "fill: rgb(255,0,0)" source))
       (should (string-match-p "#let answer = 42" source))
       (should (string-suffix-p "$answer$\n" source)))))
 
@@ -90,7 +90,7 @@
   (let* ((cache-directory (make-temp-file "org-typst-preview-test-" t))
          (org-typst-preview-image-directory cache-directory)
          (org-format-latex-options
-          '(:foreground "red" :background "Transparent" :scale 1.0))
+          '(:foreground "red" :background "white" :scale 1.0))
          (org-typst-preview--jobs (make-hash-table :test #'equal))
          (org-typst-preview--queue nil)
          (org-typst-preview--running 0)
