@@ -7,6 +7,124 @@
 (require 'ert)
 (require 'org-typst-preview)
 
+(defmacro org-typst-preview-test--with-buffer (&rest body)
+  "Run BODY in a temporary buffer, including normal buffer cleanup hooks."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer " *org-typst-preview-test*")))
+     (unwind-protect
+         (with-current-buffer buffer ,@body)
+       (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(defun org-typst-preview-test--native-available-p ()
+  "Return non-nil when native Typst highlighting can be tested."
+  (and (require 'typst-ts-mode nil t) (treesit-ready-p 'typst t)))
+
+(defun org-typst-preview-test--faces (text mode)
+  "Return the face at each character of TEXT in MODE."
+  (with-temp-buffer
+    (insert text)
+    (delay-mode-hooks (funcall mode))
+    (font-lock-ensure)
+    (mapcar (lambda (pos) (get-text-property pos 'face))
+            (number-sequence (point-min) (1- (point-max))))))
+
+(ert-deftest org-typst-preview-native-source-faces-match-typst ()
+  (skip-unless (org-typst-preview-test--native-available-p))
+  (dolist (delimiters '(("#(" . "#)") ("#[" . "#]")))
+    (let* ((body "\n  sum_(i=1)^n α + frac(1, 2) // comment\n  \"text\"\n")
+           (native (org-typst-preview-test--faces
+                    (concat "$ " body "\n$") #'typst-ts-mode)))
+      (org-typst-preview-test--with-buffer
+        (org-mode)
+        (variable-pitch-mode 1)
+        (insert (car delimiters) body (cdr delimiters))
+        (org-typst-preview-mode 1)
+        (font-lock-ensure)
+        (dotimes (i (length body))
+          (let* ((face (nth (+ i 2) native))
+                 (actual (get-text-property (+ i 3) 'face))
+                 (base (if face (car (last actual)) actual)))
+            (when face
+              (should (equal (butlast actual)
+                             (if (listp face) face (list face)))))
+            (dolist (attribute '(:family :height :weight :slant))
+              (should (equal (plist-get base attribute)
+                             (face-attribute 'default attribute))))))
+        (should (memq 'typst-ts-math-indicator-face
+                      (get-text-property 1 'face)))))))
+
+(ert-deftest org-typst-preview-highlighting-preserves-nonfragments ()
+  (skip-unless (org-typst-preview-test--native-available-p))
+  (let* ((text "* Heading\n*bold* and $x^2$ and \\#(escaped#).\n\n#+begin_example\n#[literal#]\n#+end_example\n#+begin_src typst\n#(literal#)\n#+end_src\n")
+         (expected (org-typst-preview-test--faces text #'org-mode)))
+    (org-typst-preview-test--with-buffer
+      (org-mode)
+      (insert text)
+      (org-typst-preview-mode 1)
+      (font-lock-ensure)
+      (should (equal expected
+                     (mapcar (lambda (pos) (get-text-property pos 'face))
+                             (number-sequence 1 (1- (point-max)))))))))
+
+(ert-deftest org-typst-preview-highlighting-refontifies-multiline-edits ()
+  (skip-unless (org-typst-preview-test--native-available-p))
+  (org-typst-preview-test--with-buffer
+    (org-mode)
+    (insert "Before\n#[\nx +\ny\n#]\nAfter")
+    (org-typst-preview-mode 1)
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "y")
+    (backward-delete-char 1)
+    (insert "\"hello\"")
+    (font-lock-flush (line-beginning-position) (line-end-position))
+    (font-lock-ensure (line-beginning-position) (line-end-position))
+    (should (memq 'font-lock-string-face
+                  (get-text-property (- (point) 3) 'face)))
+    (search-forward "#]")
+    (backward-delete-char 2)
+    (font-lock-flush (line-beginning-position) (line-end-position))
+    (font-lock-ensure)
+    (let ((text (buffer-string)))
+      (should (equal (mapcar (lambda (pos) (get-text-property pos 'face))
+                            (number-sequence 1 (1- (point-max))))
+                     (org-typst-preview-test--faces
+                      (substring-no-properties text) #'org-mode))))))
+
+(ert-deftest org-typst-preview-highlighting-lifecycle ()
+  (skip-unless (org-typst-preview-test--native-available-p))
+  (let ((typst-ts-mode-hook (list (lambda () (ert-fail "Editing hook ran"))))
+        hidden)
+    (org-typst-preview-test--with-buffer
+      (org-mode)
+      (insert "#(x^2#)")
+      (org-typst-preview-mode 1)
+      (setq hidden org-typst-preview--fontification-buffer)
+      (should (buffer-live-p hidden))
+      (font-lock-ensure)
+      (set-buffer-modified-p nil)
+      (org-typst-preview-mode -1)
+      (font-lock-ensure)
+      (should-not (buffer-live-p hidden))
+      (should-not (buffer-modified-p))
+      (should (equal (get-text-property 3 'face)
+                     (nth 2 (org-typst-preview-test--faces "#(x^2#)" #'org-mode))))
+      (org-typst-preview-mode 1)
+      (setq hidden org-typst-preview--fontification-buffer))
+    (should-not (buffer-live-p hidden))))
+
+(ert-deftest org-typst-preview-highlighting-is-optional ()
+  (with-temp-buffer
+    (org-mode)
+    (let ((org-typst-preview-fontify nil))
+      (org-typst-preview-mode 1)
+      (should-not org-typst-preview--fontification-buffer)
+      (should (eq (command-remapping 'org-latex-preview) #'org-typst-preview)))
+    (org-typst-preview-mode -1)
+    (cl-letf (((symbol-function 'treesit-ready-p) (lambda (&rest _) nil)))
+      (org-typst-preview-mode 1)
+      (should-not org-typst-preview--fontification-buffer))))
+
 (ert-deftest org-typst-preview-parses-boundaries ()
   (with-temp-buffer
     (org-mode)

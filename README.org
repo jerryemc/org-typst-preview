@@ -39,6 +39,7 @@ Write native Typst:
   ~org-format-latex-options~.
 - Cache location inherited from ~org-preview-latex-image-directory~.
 - Optional idle auto-preview mode.
+- Native source highlighting for both fragment styles, using ~typst-ts-mode~ faces when the mode and its tree-sitter grammar are installed.
 - The latest Typst compiler error is kept in a dedicated diagnostics buffer.
 - Temporary source files are created next to local Org files, allowing relative
   imports in ~org-typst-preview-preamble~, and removed after compilation.
@@ -105,6 +106,20 @@ Completed previews use Org's ~org-latex-overlay~ type.  Consequently,
 command remapping.
 
 * Configuration
+
+** Source highlighting
+
+With ~typst-ts-mode~ and the Typst tree-sitter grammar installed, ~org-typst-preview-mode~ highlights ~#(...#)~ and ~#[...#]~ using the same syntax faces as math in a ~.typ~ file.
+The fragment body is parsed in Typst math context; the custom delimiters use the native math delimiter face.
+Source uses explicit attributes from the Emacs ~default~ face, matching the base font of a Typst buffer even when Org enables ~variable-pitch-mode~.
+Existing Typst face customizations apply automatically; no duplicate face definitions are needed.
+Major-mode hooks are suppressed in the hidden fontification buffer, so hook-based LSP and preview processes are not started.
+
+Set ~org-typst-preview-fontify~ to ~nil~ to disable source highlighting, then toggle ~org-typst-preview-mode~ to apply the change.
+If the mode or grammar is absent, rendering remains available without native source highlighting.
+This setting controls source text only; ~org-typst-preview-font-size~ and ~org-typst-preview-font-family~ control rendered SVGs.
+
+** Preview settings
 
 The package deliberately reuses these Org settings:
 

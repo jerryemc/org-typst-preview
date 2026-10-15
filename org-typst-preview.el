@@ -42,6 +42,8 @@
 (require 'org-element)
 (require 'subr-x)
 
+(declare-function typst-ts-mode "typst-ts-mode")
+
 (defgroup org-typst-preview nil
   "Asynchronous Typst previews for Org math fragments."
   :group 'org-latex
@@ -51,6 +53,14 @@
   "Typst executable used to render previews."
   :group 'org-typst-preview
   :type 'string)
+
+(defcustom org-typst-preview-fontify t
+  "Use `typst-ts-mode' faces for Typst fragment source.
+Requires typst-ts-mode and its tree-sitter grammar.  When either is
+unavailable, previews still work without native source highlighting.
+Toggle `org-typst-preview-mode' after changing this option."
+  :group 'org-typst-preview
+  :type 'boolean)
 
 (defcustom org-typst-preview-image-directory nil
   "Directory in which to cache generated SVG previews.
@@ -115,6 +125,10 @@ Nil reuses the `:scale' value in `org-format-latex-options'."
 (defvar org-typst-preview--queue nil)
 (defvar org-typst-preview--running 0)
 (defvar-local org-typst-preview--auto-timer nil)
+(defvar-local org-typst-preview--fontification-buffer nil)
+
+(defconst org-typst-preview--font-lock-keywords
+  '((org-typst-preview--font-lock-matcher (0 nil))))
 
 (defconst org-typst-preview--cache-version 3)
 
@@ -178,6 +192,93 @@ Nil reuses the `:scale' value in `org-format-latex-options'."
           (push fragment fragments)
           (goto-char (plist-get fragment :end)))))
     (nreverse fragments)))
+
+(defun org-typst-preview--kill-fontification-buffer ()
+  "Release this Org buffer's hidden Typst buffer."
+  (when (buffer-live-p org-typst-preview--fontification-buffer)
+    (kill-buffer org-typst-preview--fontification-buffer))
+  (setq org-typst-preview--fontification-buffer nil))
+
+(defun org-typst-preview--prepare-fontification ()
+  "Set up native highlighting when Typst mode and its grammar exist."
+  (when (and org-typst-preview-fontify
+             (require 'typst-ts-mode nil t)
+             (treesit-ready-p 'typst t))
+    (unless (buffer-live-p org-typst-preview--fontification-buffer)
+      (setq org-typst-preview--fontification-buffer
+            (generate-new-buffer " *org-typst-preview-fontification*"))
+      (with-current-buffer org-typst-preview--fontification-buffer
+        ;; Fontification must not start user editing hooks (LSP, preview, etc.).
+        (delay-mode-hooks (typst-ts-mode))))
+    t))
+
+(defun org-typst-preview--fontify-fragment (fragment)
+  "Copy native Typst faces to FRAGMENT, preserving source offsets."
+  (let* ((begin (plist-get fragment :begin))
+         (end (plist-get fragment :end))
+         (body (buffer-substring-no-properties (+ begin 2) (- end 2)))
+         ;; A reference to `default' alone follows Org's variable-pitch remap.
+         (base-face (cl-loop for attribute in '(:family :foundry :width :height
+                                               :weight :slant :foreground
+                                               :background :fontset)
+                             append (list attribute
+                                          (face-attribute 'default attribute))))
+         (target (current-buffer)))
+    (with-current-buffer org-typst-preview--fontification-buffer
+      ;; Two characters on each side keep Org and Typst offsets identical.
+      ;; A newline before the closing dollar also terminates line comments.
+      (let ((inhibit-modification-hooks nil))
+        (erase-buffer)
+        (insert "$ " body "\n$"))
+      (font-lock-ensure)
+      (let ((pos 3) (stop (- (point-max) 2)))
+        (with-current-buffer target
+          (put-text-property begin end 'face base-face)
+          (put-text-property begin end 'font-lock-multiline t))
+        (while (< pos stop)
+          (let* ((next (next-single-property-change pos 'face nil stop))
+                 (face (get-text-property pos 'face)))
+            (when face
+              (put-text-property
+               (+ begin pos -1) (+ begin next -1) 'face
+               (append (if (listp face) face (list face)) (list base-face))
+               target))
+            (setq pos next)))
+        (dolist (bounds (list (cons begin (+ begin 2))
+                             (cons (- end 2) end)))
+          (put-text-property
+           (car bounds) (cdr bounds) 'face
+           (let ((face (get-text-property 1 'face)))
+             (append (if (listp face) face (list face)) (list base-face)))
+           target))))))
+
+(defun org-typst-preview--font-lock-matcher (limit)
+  "Fontify the next complete Typst fragment starting before LIMIT."
+  (when (buffer-live-p org-typst-preview--fontification-buffer)
+    (let (fragment)
+      (while (and (not fragment)
+                  (re-search-forward (rx "#" (or "(" "[")) limit t))
+        (setq fragment
+              (org-typst-preview--fragment-at (match-beginning 0))))
+      (when fragment
+        (org-typst-preview--fontify-fragment fragment)
+        (goto-char (plist-get fragment :end))
+        (set-match-data (list (plist-get fragment :begin) (point)))
+        t))))
+
+(defvar font-lock-beg)
+(defvar font-lock-end)
+
+(defun org-typst-preview--extend-font-lock-region ()
+  "Include complete Typst fragments when refontifying an edited region."
+  (let ((begin font-lock-beg) (end font-lock-end))
+    (save-excursion
+      (dolist (position (list begin end))
+        (goto-char position)
+        (when-let* ((fragment (org-typst-preview--fragment-at-point)))
+          (setq font-lock-beg (min font-lock-beg (plist-get fragment :begin))
+                font-lock-end (max font-lock-end (plist-get fragment :end))))))
+    (or (/= begin font-lock-beg) (/= end font-lock-end))))
 
 (defun org-typst-preview--source (value face)
   "Return a complete Typst preview document for VALUE at FACE."
@@ -472,10 +573,28 @@ and three clear the whole buffer."
   :lighter " Typst∑"
   :keymap org-typst-preview-mode-map
   (if org-typst-preview-mode
-      (add-hook 'org-export-before-parsing-functions
-                #'org-typst-preview--export-before-parsing nil t)
+      (progn
+        (add-hook 'org-export-before-parsing-functions
+                  #'org-typst-preview--export-before-parsing nil t)
+        (when (org-typst-preview--prepare-fontification)
+          (font-lock-add-keywords nil org-typst-preview--font-lock-keywords 'append)
+          (add-hook 'font-lock-extend-region-functions
+                    #'org-typst-preview--extend-font-lock-region nil t)
+          (add-hook 'kill-buffer-hook
+                    #'org-typst-preview--kill-fontification-buffer nil t)
+          (add-hook 'change-major-mode-hook
+                    #'org-typst-preview--kill-fontification-buffer nil t)))
     (remove-hook 'org-export-before-parsing-functions
-                 #'org-typst-preview--export-before-parsing t)))
+                 #'org-typst-preview--export-before-parsing t)
+    (font-lock-remove-keywords nil org-typst-preview--font-lock-keywords)
+    (remove-hook 'font-lock-extend-region-functions
+                 #'org-typst-preview--extend-font-lock-region t)
+    (remove-hook 'kill-buffer-hook
+                 #'org-typst-preview--kill-fontification-buffer t)
+    (remove-hook 'change-major-mode-hook
+                 #'org-typst-preview--kill-fontification-buffer t)
+    (org-typst-preview--kill-fontification-buffer))
+  (font-lock-flush))
 
 (defun org-typst-preview--auto-run (buffer marker)
   "Preview the fragment near MARKER in BUFFER."
